@@ -1,5 +1,6 @@
 import os
 import logging
+import traceback
 from flask import Flask, request, jsonify
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
@@ -20,43 +21,56 @@ logger = logging.getLogger(name)
 # --- BOT LOGIC ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a welcome message when the /start command is issued."""
-    logger.info("Received /start command")
+    logger.info("Received /start command from user %s", update.effective_user.id)
     await update.message.reply_text("Welcome.")
 
-# --- BOT SETUP ---
-async def setup_bot():
-    """Initializes the bot application and sets up the start handler."""
+# --- BOT SETUP (Global Instance) ---
+# Create the Application instance once to be reused.
+# This is more efficient and stable than creating it on every request.
+try:
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start_command))
-    return application
+except Exception as e:
+    logger.error(f"Failed to initialize Telegram application: {e}")
+    application = None
+
 
 # --- FLASK ROUTES (FOR VERCEL) ---
 @app.route('/api', methods=['POST'])
 async def webhook():
     """This endpoint receives updates from Telegram."""
+    if not application:
+        logger.error("Application not initialized. Cannot process update.")
+        return jsonify({"status": "error", "message": "Bot not initialized"}), 500
+        
     try:
-        application = await setup_bot()
         update_data = request.get_json(force=True)
         update = Update.de_json(update_data, application.bot)
+        
+        # Use the global application instance to process the update
         async with application:
             await application.process_update(update)
+            
         logger.info("Webhook processed successfully.")
         return jsonify({"status": "ok"})
     except Exception as e:
-        logger.error(f"Error in webhook: {e}")
+        logger.error(f"Error in webhook: {e}\n{traceback.format_exc()}")
         return jsonify({"status": "error"}), 500
 
 @app.route('/set_webhook', methods=['GET'])
 async def set_webhook():
     """This endpoint is called once to set the webhook with Telegram."""
+    if not application:
+        return "Error: Bot application not initialized.", 500
     if not VERCEL_URL:
         return "Error: VERCEL_URL environment variable is not set.", 500
-    
-    application = await setup_bot()
+
     webhook_url = f"https://{VERCEL_URL}/api"
     
-    success = await application.bot.set_webhook(url=webhook_url)
-    
+    # Use the global application instance to set the webhook
+    async with application:
+        success = await application.bot.set_webhook(url=webhook_url)
+
     if success:
         logger.info(f"Webhook set to {webhook_url}")
         return f"Webhook set successfully to {webhook_url}", 200
